@@ -234,6 +234,85 @@ class StoichiometryPlanResponse(BaseModel):
     materials: list[MaterialPlan] = Field(description="逐原料投料规划")
 
 
+class InitialMolesItem(BaseModel):
+    formula: str = Field(
+        description="物种分子式（必须是 reactants/products 之一）",
+        examples=["N2O4"],
+    )
+    moles: Decimal = Field(
+        description="初始摩尔数（非负，mol，非法值由接口返回 400）",
+        examples=["1.0"],
+    )
+
+
+class EquilibriumRequest(BaseModel):
+    reactants: list[str] = Field(
+        min_length=1,
+        description="反应物分子式列表",
+        examples=[["N2O4"]],
+    )
+    products: list[str] = Field(
+        min_length=1,
+        description="生成物分子式列表",
+        examples=[["NO2"]],
+    )
+    initial_moles: list[InitialMolesItem] = Field(
+        description="每个物种恰好一条初始摩尔数（mol，非负）"
+    )
+    volume: Decimal = Field(
+        description="反应体系体积 V（L，正数；按浓度平衡常数 Kc 计）",
+        examples=["1.0"],
+    )
+    kc: Decimal = Field(
+        description="浓度平衡常数 Kc（正数，无量纲/按标准态约定）",
+        examples=["0.04"],
+    )
+    precision: int = Field(
+        default=4,
+        ge=2,
+        le=8,
+        description="输出小数位数（四舍五入），2～8，默认 4",
+    )
+
+
+class EquilibriumSpecies(BaseModel):
+    formula: str
+    side: Literal["reactant", "product"] = Field(description="物种所在侧")
+    coefficient: int = Field(description="配平系数（绝对值）")
+    initial_moles: str = Field(description="初始摩尔数（mol）")
+    equilibrium_moles: str = Field(description="平衡摩尔数（mol）")
+    concentration: str = Field(description="平衡浓度（mol/L，= 平衡摩尔数 / V）")
+
+
+class EquilibriumResponse(BaseModel):
+    equation: str
+    coefficients: list[int] = Field(description="全部系数（先反应物后生成物）")
+    reactant_coefficients: list[int]
+    product_coefficients: list[int]
+    precision: int = Field(description="实际采用的小数位数")
+    volume: str = Field(description="体积（L，回显）")
+    kc: str = Field(description="平衡常数 Kc（回显）")
+    direction: Literal["forward", "reverse", "at_equilibrium"] = Field(
+        description="反应方向：forward 正向（ξ>0）、reverse 逆向（ξ<0）、at_equilibrium 初始即平衡"
+    )
+    extent: str = Field(
+        description="平衡反应进度 ξ（mol，有符号；正向为正、逆向为负）"
+    )
+    extent_min: str = Field(
+        description="可行反应进度下界（mol，≤0；逆向进行的极限）"
+    )
+    extent_max: str = Field(
+        description="可行反应进度上界（mol，≥0；正向进行的极限）"
+    )
+    qc: str = Field(description="平衡浓度商 Qc（平衡时应等于 Kc）")
+    residual: str = Field(
+        description="有符号残差 ln(Qc) - ln(Kc)（正表示 Qc 偏大、负表示偏小）"
+    )
+    species: list[EquilibriumSpecies] = Field(
+        description="各物种初始/平衡摩尔数与平衡浓度（先反应物后生成物）"
+    )
+
+
 class FormulaInferRequest(BaseModel):
     percentages: dict[str, Decimal] = Field(
         min_length=1,

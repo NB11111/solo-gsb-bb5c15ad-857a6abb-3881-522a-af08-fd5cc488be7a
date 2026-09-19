@@ -10,6 +10,8 @@
 
 以及**氧化还原自动补全接口**：给定两侧已知物种（所在侧固定）与介质（`acidic`/`basic`），仅引入 H2O、H+（酸性）或 H2O、OH-（碱性）作为可出现在任一侧的辅助物种，求出元素与电荷均守恒的最小正整数净反应；多组最简解无法唯一判定或无法补全时返回 `422` 并说明原因。
 
+以及**单反应平衡组成接口**：先精确配平得到化学计量数，再在所有物种摩尔数非负的反应进度区间内（同时允许正向与逆向），用 `Decimal` 对 `ln Qc − ln Kc` 做有界二分，返回反应方向、有符号平衡反应进度、各物种平衡摩尔数与浓度、平衡 `Qc` 及有符号残差；正确处理初始摩尔数为零与端点 `Qc → 0/∞` 的发散情形。
+
 ## 快速启动（单条命令）
 
 ```bash
@@ -346,6 +348,107 @@ curl -s http://localhost:8000/api/v1/formula/infer \
 }
 ```
 
+### `POST /api/v1/equilibrium` — 单反应平衡组成
+
+给定反应物、生成物、**每个物种恰好一条**非负初始摩尔数、体系体积 `volume`（L）与浓度平衡常数 `kc`，计算封闭体系在定容下的平衡组成：
+
+1. 复用精确配平得到最小正整数化学计量数，按标准约定取有符号计量数 ν（反应物为负、生成物为正），`n_i(ξ) = n_i0 + ν_i·ξ`；
+2. 由非负约束确定可行反应进度区间 `[extent_min, extent_max]`（`extent_min ≤ 0 ≤ extent_max`，故正向、逆向均允许）：
+   - 反应物：`ξ ≤ n0_i/|ν_i|`（正向极限）；生成物：`ξ ≥ −n0_i/ν_i`（逆向极限）；
+3. 在区间内对 **`f(ξ) = ln Qc(ξ) − ln Kc`** 做 `Decimal` 有界二分。开区间内各物种摩尔数严格为正，且 `f'(ξ) = Σ ν_i²/n_i > 0`，故根唯一；端点处按零摩尔数所在侧直接取 `ln Qc → −∞/+∞` 的符号，**初始为零的物种与端点发散均无需取极限、不会出现 `ln 0`**；
+4. 按根的符号返回 `direction`（`forward` / `reverse` / `at_equilibrium`），以及各物种平衡摩尔数、平衡浓度（`n_i/V`）、平衡 `Qc` 和有符号残差 `ln Qc − ln Kc`。
+
+- 初始摩尔数必须**非负**（零合法，例如纯反应物投料时生成物初始为零）；`volume` 与 `kc` 必须为正数。
+- 反应进度区间退化为一点（某反应物与某生成物初始均为零，唯一可行点处 `Qc = 0/0` 无定义）时返回 `422`，并附带退化区间与零摩尔数物种诊断信息。
+- 全程 `Decimal`（内部 200 位精度）计算；小数字段按 `precision`（2～8，默认 4）四舍五入为定长小数字符串，`Qc`/`Kc` 过大或过小（定点形式会丢失有效数字）时自动改为科学计数法。
+
+正向（生成物初始为零）——N₂O₄ ⇌ 2NO₂，`Qc = [NO2]²/[N2O4]`，V = 1 L，Kc = 0.04：
+
+```bash
+curl -s http://localhost:8000/api/v1/equilibrium \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "reactants": ["N2O4"],
+        "products": ["NO2"],
+        "initial_moles": [
+          {"formula": "N2O4", "moles": "1"},
+          {"formula": "NO2",  "moles": "0"}
+        ],
+        "volume": "1",
+        "kc": "0.04",
+        "precision": 4
+      }'
+```
+
+响应（`200`，解析解 ξ = (−0.04 + √0.6416)/8 ≈ 0.09512）：
+
+```json
+{
+  "equation": "N2O4 -> 2NO2",
+  "coefficients": [1, 2],
+  "reactant_coefficients": [1],
+  "product_coefficients": [2],
+  "precision": 4,
+  "volume": "1.0000",
+  "kc": "0.0400",
+  "direction": "forward",
+  "extent": "0.0951",
+  "extent_min": "0.0000",
+  "extent_max": "1.0000",
+  "qc": "0.0400",
+  "residual": "+0.0000",
+  "species": [
+    {"formula": "N2O4", "side": "reactant", "coefficient": 1,
+     "initial_moles": "1.0000", "equilibrium_moles": "0.9049", "concentration": "0.9049"},
+    {"formula": "NO2",  "side": "product",  "coefficient": 2,
+     "initial_moles": "0.0000", "equilibrium_moles": "0.1902", "concentration": "0.1902"}
+  ]
+}
+```
+
+逆向（反应物初始为零）——只投 1 mol NO₂ 时反应向左进行，`extent` 为负，`extent_min = −n0(NO2)/2 = −0.5`：
+
+```bash
+curl -s http://localhost:8000/api/v1/equilibrium \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "reactants": ["N2O4"],
+        "products": ["NO2"],
+        "initial_moles": [
+          {"formula": "N2O4", "moles": "0"},
+          {"formula": "NO2",  "moles": "1"}
+        ],
+        "volume": "1",
+        "kc": "0.04",
+        "precision": 6
+      }'
+# -> direction: "reverse", extent: "-0.434113", extent_min: "-0.500000",
+#    平衡时 N2O4 = 0.434113 mol，NO2 = 0.131774 mol，Qc = 0.040000
+```
+
+体积效应（Δn ≠ 0）——N₂ ⇌ 2N，V = 4 L、Kc = 1 时 ξ = (√5−1)/2 ≈ 0.618034；改为 V = 1 L 则 ξ ≈ 0.390388（体积越大，解离越彻底）。
+
+错误返回：
+
+| 状态码 | 场景 |
+| --- | --- |
+| `400` | 化学式无法解析；初始摩尔数缺失/重复/为负；物种不在反应物/生成物列表；`volume` 或 `kc` 非正数 |
+| `422` | 方程无法配平（零空间维数不为 1 或无法全正）；非负摩尔数的反应进度区间退化为一点，`Qc` 无定义；`precision` 超出 2～8 |
+
+`422`（无可行区间）响应的 `detail` 附带诊断信息：
+
+```json
+{
+  "detail": {
+    "message": "满足所有物种摩尔数非负的反应进度区间退化为一点，该点处 Qc 无定义（反应物与生成物中均存在初始摩尔数为零的物种），无法计算平衡组成",
+    "xi_min": "0.0000",
+    "xi_max": "0.0000",
+    "zero_reactants": ["O2"],
+    "zero_products": ["H2O"]
+  }
+}
+```
+
 ## 本地开发
 
 ```bash
@@ -362,9 +465,10 @@ app/
   balancer.py       # 守恒矩阵（含电荷行）、有理数 RREF、零空间、整数化
   redox.py          # 氧化还原自动补全：H2O/H+/OH- 辅助列、介质折算、净反应组装
   stoichiometry.py  # 内置原子量表、投料换算、限制反应物、产量与剩余量、批次投料规划（Decimal）
+  equilibrium.py    # 单反应平衡：可行反应进度区间 + ln(Qc/Kc) Decimal 有界二分（Decimal）
   formula_infer.py  # 质量百分比 → 摩尔比 → 互质下标候选 → 经验式/分子式推断（Decimal）
   schemas.py        # 请求/响应模型
   main.py           # FastAPI 路由
-tests/test_api.py / tests/test_redox.py / tests/test_stoichiometry.py / tests/test_stoichiometry_plan.py / tests/test_formula_infer.py
+tests/test_api.py / tests/test_redox.py / tests/test_stoichiometry.py / tests/test_stoichiometry_plan.py / tests/test_equilibrium.py / tests/test_formula_infer.py
 Dockerfile / docker-compose.yml
 ```

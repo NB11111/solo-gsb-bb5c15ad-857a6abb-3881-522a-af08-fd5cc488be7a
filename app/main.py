@@ -4,12 +4,19 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 
 from .balancer import BalanceError, balance_equation, verify_coefficients
+from .equilibrium import (
+    EquilibriumError,
+    NoFeasibleIntervalError,
+    compute_equilibrium,
+)
 from .formula_infer import FormulaInferError, NoSolutionError, infer_formula
 from .parser import FormulaError
 from .redox import balance_redox
 from .schemas import (
     BalanceRequest,
     BalanceResponse,
+    EquilibriumRequest,
+    EquilibriumResponse,
     FormulaInferRequest,
     FormulaInferResponse,
     RedoxBalanceRequest,
@@ -34,11 +41,13 @@ app = FastAPI(
         "支持嵌套括号、点号结晶水与末尾离子电荷；并提供基于内置原子量表的"
         "化学计量计算（限制反应物、理论产量与剩余量）、反应批次投料规划"
         "（由目标产量与收率反推各原料称量）、由元素质量百分比"
-        "反推经验式/分子式的推断接口，以及氧化还原反应自动补全接口"
+        "反推经验式/分子式的推断接口、单反应平衡组成计算接口"
+        "（精确配平后在非负反应进度区间内用 Decimal 有界二分求平衡进度），"
+        "以及氧化还原反应自动补全接口"
         "（已知物种所在侧固定，仅引入 H2O/H+/OH- 补齐守恒项，"
         "支持酸性/碱性介质）。"
     ),
-    version="1.4.0",
+    version="1.5.0",
 )
 
 
@@ -193,6 +202,52 @@ def stoichiometry_plan(req: StoichiometryPlanRequest) -> dict:
         ) from exc
     except StoichiometryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/v1/equilibrium",
+    response_model=EquilibriumResponse,
+    tags=["equilibrium"],
+    summary="单反应平衡组成：二分求平衡反应进度与各物种摩尔数/浓度",
+    responses={
+        400: {
+            "description": (
+                "化学式无法解析、初始摩尔数缺失/重复/为负/物种不在反应式、"
+                "或体积与 Kc 非正数"
+            )
+        },
+        422: {
+            "description": (
+                "方程无法配平（零空间维数不为 1，或无法化为全正系数）；"
+                "非负摩尔数的反应进度区间退化为一点，Qc 无定义"
+            )
+        },
+    },
+)
+def equilibrium(req: EquilibriumRequest) -> dict:
+    try:
+        return compute_equilibrium(
+            req.reactants,
+            req.products,
+            req.initial_moles,
+            req.volume,
+            req.kc,
+            req.precision,
+        )
+    except FormulaError as exc:
+        raise HTTPException(status_code=400, detail=f"化学式解析失败: {exc}") from exc
+    except BalanceError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": exc.message, "null_space_dim": exc.nullity},
+        ) from exc
+    except EquilibriumError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except NoFeasibleIntervalError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": exc.message, **exc.context},
+        ) from exc
 
 
 @app.post(
