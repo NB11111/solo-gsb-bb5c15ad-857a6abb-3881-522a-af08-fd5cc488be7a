@@ -10,6 +10,8 @@
 
 以及**氧化还原自动补全接口**：给定两侧已知物种（所在侧固定）与介质（`acidic`/`basic`），仅引入 H2O、H+（酸性）或 H2O、OH-（碱性）作为可出现在任一侧的辅助物种，求出元素与电荷均守恒的最小正整数净反应；多组最简解无法唯一判定或无法补全时返回 `422` 并说明原因。
 
+以及**单反应平衡组成接口**：给出每个物种恰好一条初始摩尔数、体系体积与浓度平衡常数 Kc，复用精确配平得到化学计量数后，在所有物种摩尔数非负的反应进度区间内（同时允许正向 ξ>0 与逆向 ξ<0）用 `Decimal` 对 `ln Qc − ln Kc` 做有界求根（常规区域牛顿二次收敛、端点对数区域指数步跨越、异常退回纯二分），正确处理初始为零及端点趋于无穷的情形，返回反应方向、平衡反应进度、各物种平衡摩尔数与浓度、Qc 及对数残差。
+
 ## 快速启动（单条命令）
 
 ```bash
@@ -346,6 +348,99 @@ curl -s http://localhost:8000/api/v1/formula/infer \
 }
 ```
 
+### `POST /api/v1/equilibrium` — 单反应平衡组成
+
+给定每个物种**恰好一条**初始摩尔数（允许为 `0`、不允许为负）、体系体积 `volume`（>0）与浓度平衡常数 `kc`（>0），计算单反应的平衡组成：
+
+- 先复用精确配平得到最小正整数化学计量数；反应物的有符号计量数取 `−ν`、生成物取 `+ν`，组成按 `n_i(ξ) = n_i0 + ν_i·ξ` 随反应进度 ξ 变化。
+- 由所有物种摩尔数非负确定可行区间 `[ξ_min, ξ_max]`：`ξ_max = min_{反应物} n_i0/ν_i`，`ξ_min = max_{生成物} −n_i0/ν_i`；区间覆盖正负两个方向（`ξ>0` 正向、`ξ<0` 逆向）。
+- `f(ξ) = ln Qc − ln Kc` 在开区间内严格单调（`f'(ξ) = Σ ν_i²/n_i > 0`），端点处零摩尔物种使 `Qc → 0/∞`、`f → ∓∞`，故平衡根唯一且必在内部。全程 `Decimal` 计算（内部精度随 `Kc`/体积/投料量级自适应，至少 50 位）：常规区域用牛顿步（二次收敛），端点对数区域用指数步单步跨越数十个数量级，候选点始终严格落在括号区间内，数值异常时退回有界二分。
+- 反应方向 `direction`：`forward`（Qc<Kc，正向）、`reverse`（Qc>Kc，逆向）、`equilibrium`（初始组成恰好满足 Qc=Kc，ξ=0）。初始缺反应物（Qc=0）只能逆向、初始缺生成物（Qc=∞）只能正向；若**两侧都存在零初始物种**，可行区间退化为单点，正向、逆向均无法启动，返回 `422`。
+- 所有小数字段按 `precision`（2～8，默认 4）四舍五入为**定长小数字符串**返回；`residual` 为对数残差 `ln(Qc/Kc)`（平衡时为 `0.0000`）。
+
+```bash
+curl -s http://localhost:8000/api/v1/equilibrium \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "reactants": ["N2O4"],
+        "products": ["NO2"],
+        "initial_moles": [
+          {"formula": "N2O4", "moles": 1},
+          {"formula": "NO2",  "moles": 0}
+        ],
+        "volume": 2,
+        "kc": "0.1",
+        "precision": 4
+      }'
+```
+
+响应（`200`）：
+
+```json
+{
+  "equation": "N2O4 -> 2NO2",
+  "coefficients": [1, 2],
+  "reactant_coefficients": [1],
+  "product_coefficients": [2],
+  "precision": 4,
+  "volume": "2",
+  "kc": "0.1",
+  "direction": "forward",
+  "extent": "0.2000",
+  "extent_min": "0.0000",
+  "extent_max": "1.0000",
+  "qc": "0.1000",
+  "residual": "0.0000",
+  "species": [
+    {"formula": "N2O4", "side": "reactants", "coefficient": 1,
+     "initial_moles": "1.0000", "equilibrium_moles": "0.8000", "concentration": "0.4000"},
+    {"formula": "NO2",  "side": "products",  "coefficient": 2,
+     "initial_moles": "0.0000", "equilibrium_moles": "0.4000", "concentration": "0.2000"}
+  ]
+}
+```
+
+逆向进行的例子（初始只有生成物、Qc=0）：
+
+```bash
+curl -s http://localhost:8000/api/v1/equilibrium \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "reactants": ["H2", "I2"],
+        "products": ["HI"],
+        "initial_moles": [
+          {"formula": "H2", "moles": 0},
+          {"formula": "I2", "moles": 0},
+          {"formula": "HI", "moles": 2}
+        ],
+        "volume": 1,
+        "kc": 49,
+        "precision": 6
+      }'
+# H2 + I2 ⇌ 2HI：ξ = -2/9（逆向），H2=I2=0.222222，HI=1.555556，Qc=49
+```
+
+错误返回：
+
+| 状态码 | 场景 |
+| --- | --- |
+| `400` | 化学式无法解析；初始摩尔数缺失/重复/为负/物种不在方程中；所有物种初始摩尔数均为 0；`volume` 或 `kc` 非正数 |
+| `422` | 方程无法配平（零空间维数不为 1 或无法全正）；可行反应进度区间退化为单点（初始为零的反应物与生成物同时存在）；`precision` 超出 2～8 |
+
+`422`（无可行区间）响应的 `detail` 附带诊断信息（零初始物种与区间端点）：
+
+```json
+{
+  "detail": {
+    "message": "可行反应进度区间退化为单点 ξ=0：反应物与生成物中均存在初始摩尔数为 0 的物种，正向与逆向都无法启动，不存在满足 Qc=Kc 的非平凡平衡组成",
+    "zero_reactants": ["I2"],
+    "zero_products": ["HI"],
+    "extent_min": "0.0000",
+    "extent_max": "0.0000"
+  }
+}
+```
+
 ## 本地开发
 
 ```bash
@@ -363,8 +458,9 @@ app/
   redox.py          # 氧化还原自动补全：H2O/H+/OH- 辅助列、介质折算、净反应组装
   stoichiometry.py  # 内置原子量表、投料换算、限制反应物、产量与剩余量、批次投料规划（Decimal）
   formula_infer.py  # 质量百分比 → 摩尔比 → 互质下标候选 → 经验式/分子式推断（Decimal）
+  equilibrium.py    # 可行反应进度区间 → ln Qc-ln Kc 有界求根（牛顿/指数步/二分，Decimal）
   schemas.py        # 请求/响应模型
   main.py           # FastAPI 路由
-tests/test_api.py / tests/test_redox.py / tests/test_stoichiometry.py / tests/test_stoichiometry_plan.py / tests/test_formula_infer.py
+tests/test_api.py / tests/test_redox.py / tests/test_stoichiometry.py / tests/test_stoichiometry_plan.py / tests/test_formula_infer.py / tests/test_equilibrium.py
 Dockerfile / docker-compose.yml
 ```
